@@ -1,0 +1,15 @@
+[package]
+name = "responds"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+socket2 = "0.6"
+signal-hook = "0.4"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
