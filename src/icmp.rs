@@ -3,7 +3,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const ICMPV4_ECHO_REQUEST: u8 = 8;
 const ICMPV4_ECHO_REPLY: u8 = 0;
@@ -165,10 +165,6 @@ fn checksum(data: &[u8]) -> u16 {
     }
     !(sum as u16)
 }
-
-// Suppress dead_code for the unused constant if any probe target paths are narrowed later.
-#[allow(dead_code)]
-const _: Duration = Duration::from_secs(0);
 
 #[cfg(test)]
 mod tests {
