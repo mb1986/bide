@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(short = 't', long, default_value_t = 0, value_name = "SECS")]
     pub timeout: u64,
 
+    /// Invert the streak rule: wait for the host to stop responding instead.
+    #[arg(long = "not")]
+    pub not: bool,
+
     /// Suppress progress output; only exit code matters.
     #[arg(short = 'q', long, conflicts_with = "verbose")]
     pub quiet: bool,

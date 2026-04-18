@@ -39,6 +39,7 @@ responds [OPTIONS] <HOST>
 | `-c` | `--count`     | `3`     | Number of consecutive successful probes required.     |
 | `-n` | `--max-tries` | `0`     | Maximum total probe attempts. `0` means no limit.     |
 | `-t` | `--timeout`   | `0`     | Overall deadline in seconds. `0` means no deadline.   |
+| —    | `--not`       | off     | Invert: wait for the host to *stop* responding.       |
 | `-q` | `--quiet`     | off     | Suppress progress output; only exit code matters.     |
 | `-v` | `--verbose`   | off     | Print each attempt with sequence number and RTT.      |
 | `-h` | `--help`      | —       | Show help.                                            |
@@ -50,11 +51,16 @@ responds [OPTIONS] <HOST>
 
 Every `--interval` seconds, one probe is sent. A probe that does not answer before the next tick is a failure and **resets the streak to 0**. As soon as `--count` successes land in a row, the tool exits `0`. If `--timeout` elapses or `--max-tries` is exhausted first, it exits `1`.
 
-Three different "give up" events are reported:
+Events reported during a run:
 
-- `no response — streak reset` — a single probe timed out; the loop continues.
+- `no response — streak reset` — default mode: probe timed out; the loop continues.
+- `responded — streak reset` — `--not` mode: probe got a reply; the loop continues.
 - `deadline reached after Ns` — overall `--timeout` hit; the tool exits `1`.
 - `max tries reached after N attempts` — `--max-tries` exhausted; the tool exits `1`.
+
+### Inverted mode (`--not`)
+
+`--not` flips the streak rule: a no-response counts toward the streak, and a successful reply resets it. Useful for waiting on a host to *go* offline — e.g. confirming a shutdown took effect. **Caveat:** a no-response is indistinguishable from a local network fault (no route, firewall drop), so `--not` is not a safety-critical "host is confirmed gone" signal.
 
 ## Examples
 
@@ -67,6 +73,9 @@ responds -i 5 -c 3 -t 30 192.168.10.10
 
 # Bound by attempts instead of wall-clock: give up after 10 probes.
 responds -c 3 -n 10 192.168.10.10
+
+# Wait up to 60 s for a host to stop responding (confirm shutdown took effect).
+responds --not -t 60 server01 && echo "server01 stopped responding"
 
 # Power-cycle a host and wait for it to stabilize before SSHing in.
 pwrctl off server01 && sleep 5 && pwrctl on server01 && \

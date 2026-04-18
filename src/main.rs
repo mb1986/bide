@@ -78,6 +78,7 @@ fn main() -> ExitCode {
         } else {
             Some(Duration::from_secs(cli.timeout))
         },
+        invert: cli.not,
         verbosity,
         interrupted,
         terminated,

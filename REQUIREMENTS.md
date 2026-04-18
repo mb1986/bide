@@ -4,7 +4,7 @@ A small Linux command-line tool that blocks until a remote host is *stably* reac
 
 Reads as a predicate at the call site: `responds -t 30 server01 && ssh server01 ...`
 
-Also exposes a tries-based cap (`-n`) for callers that prefer to bound by attempts rather than wall-clock time.
+Also exposes a tries-based cap (`-n`) for callers that prefer to bound by attempts rather than wall-clock time, and an inversion flag (`--not`) that waits for a host to *stop* responding rather than start.
 
 ## Rationale
 
@@ -42,6 +42,8 @@ responds [OPTIONS] <HOST>
 
 Three distinct "give up" events exist and are reported with different words: a single probe not answering within `--interval` is a **no response** (resets the streak, loop continues); the overall `--timeout` being reached is a **deadline** (tool exits 1); `--max-tries` being exhausted is **max tries reached** (tool exits 1). See [Output](#output).
 
+**Inverted mode (`--not`):** steps 3 and 4 swap roles. A probe that fails to get a response counts toward the streak; a probe that *did* get a response resets the streak to zero. Everything else — scheduling, timeout, max-tries, exit codes — is unchanged. Useful for scripts that must wait for a host to go offline (e.g., confirming a shutdown completed) before proceeding.
+
 ## Command-line interface
 
 | Flag | Long form | Default | Meaning |
@@ -50,6 +52,7 @@ Three distinct "give up" events exist and are reported with different words: a s
 | `-c` | `--count` | `3` | Number of consecutive successful probes required. |
 | `-n` | `--max-tries` | `0` | Maximum total probe attempts. `0` means no limit. |
 | `-t` | `--timeout` | `0` | Overall deadline in seconds. `0` means no deadline. |
+| —    | `--not` | off | Invert: wait for the host to *stop* responding instead. |
 | `-q` | `--quiet` | off | Suppress progress output; only exit code matters. |
 | `-v` | `--verbose` | off | Print each attempt and its result. |
 | `-h` | `--help` | — | Show help. |
@@ -80,6 +83,7 @@ Positional argument: `HOST` — an IPv4 address, IPv6 address, or hostname.
 - **FR-9** Must work without root on Linux kernels that support unprivileged ICMP sockets (`net.ipv4.ping_group_range`). Fall back to a clear error if neither unprivileged ICMP nor `CAP_NET_RAW` is available — do not silently degrade to shelling out to `/bin/ping`.
 - **FR-10** The per-probe response wait is bounded by `--interval`. A probe that has not succeeded by the time the next tick fires is counted as a failure. This keeps the "one probe per tick" invariant (FR-2) trivially true and avoids a separate per-probe timeout flag in v1.
 - **FR-11** If `--max-tries` is non-zero, the tool exits `1` once that many probe attempts have been completed without achieving the streak. Every attempt counts toward the limit, whether it succeeded or not — the budget is total attempts, not failures. When both `--timeout` and `--max-tries` are set, whichever limit is hit first terminates the run.
+- **FR-12** The `--not` flag inverts the streak rule: a no-response counts toward the streak, and a successful reply resets it to zero. Timeouts, attempt budgets, exit codes, and output cadence are otherwise identical to default mode. Caveat: a no-response cannot be distinguished from a local network fault (no route, firewall drop, ARP failure); `--not` is therefore not a safety-critical "host is confirmed gone" signal.
 
 ## Non-functional requirements
 
@@ -93,9 +97,10 @@ Positional argument: `HOST` — an IPv4 address, IPv6 address, or hostname.
 
 Default (neither `-q` nor `-v`): one line per state transition. Two distinct events appear:
 
-- `N/M` — a probe succeeded; streak is now at N out of M required.
-- `no response — streak reset` — a probe did not answer within `--interval`; streak returns to 0.
-- `M/M ok` — final successful probe; tool exits 0.
+- `N/M` — a probe matched the streak condition; streak is now at N out of M required.
+- `no response — streak reset` — default mode: a probe did not answer within `--interval`; streak returns to 0.
+- `responded — streak reset` — `--not` mode: a probe *did* answer; streak returns to 0.
+- `M/M ok` — final streak-matching probe; tool exits 0.
 - `deadline reached after Ns` — overall `--timeout` elapsed; tool exits 1.
 - `max tries reached after N attempts` — `--max-tries` attempts were made without hitting the streak; tool exits 1.
 
@@ -132,6 +137,9 @@ responds -i 5 -c 3 -t 30 192.168.10.10
 
 # Bound by attempts instead of wall-clock: give up after 10 probes.
 responds -c 3 -n 10 192.168.10.10
+
+# Wait up to 60 s for a host to go silent (e.g. confirm a shutdown has taken).
+responds --not -t 60 server01 && echo "server01 stopped responding"
 
 # In a script: power-cycle a host and wait for it to come back up.
 pwrctl off server01 && sleep 5 && pwrctl on server01 && \

@@ -26,6 +26,8 @@ pub struct Scheduler<P: Probe> {
     pub count: u32,
     pub max_tries: Option<u32>,
     pub timeout: Option<Duration>,
+    /// If true, invert the streak rule: a no-response builds the streak and a reply resets.
+    pub invert: bool,
     pub verbosity: Verbosity,
     pub interrupted: Arc<AtomicBool>,
     pub terminated: Arc<AtomicBool>,
@@ -42,7 +44,7 @@ impl<P: Probe> Scheduler<P> {
             let mut err = std::io::stderr().lock();
             let _ = writeln!(
                 err,
-                "responds: probe={} target={} interval={}s count={} max-tries={} timeout={}",
+                "responds: probe={} target={} interval={}s count={} max-tries={} timeout={} mode={}",
                 self.probe.name(),
                 target,
                 self.interval.as_secs(),
@@ -54,7 +56,8 @@ impl<P: Probe> Scheduler<P> {
                 match self.timeout {
                     Some(t) => format!("{}s", t.as_secs()),
                     None => "none".to_string(),
-                }
+                },
+                if self.invert { "not" } else { "default" }
             );
         }
 
@@ -107,27 +110,30 @@ impl<P: Probe> Scheduler<P> {
             }
             attempts = attempts.saturating_add(1);
 
-            match outcome {
-                ProbeOutcome::Success { rtt, seq } => {
-                    streak += 1;
-                    if streak >= self.count {
-                        self.print_final_ok(target, streak, rtt, seq);
-                        return RunResult::Success;
-                    }
-                    self.print_progress(target, streak, rtt, seq);
+            // FR-12: --not inverts which outcome builds the streak.
+            let (builds_streak, streak_rtt, streak_seq) = match outcome {
+                ProbeOutcome::Success { rtt, seq } => (!self.invert, Some(rtt), seq),
+                ProbeOutcome::NoResponse => (self.invert, None, seq),
+            };
+
+            if builds_streak {
+                streak += 1;
+                if streak >= self.count {
+                    self.print_final_ok(target, streak, streak_rtt, streak_seq);
+                    return RunResult::Success;
                 }
-                ProbeOutcome::NoResponse => {
-                    // Distinguish deadline from no-response: if the overall timeout fired
-                    // during this probe, report that, not a streak reset.
-                    if let Some(d) = deadline {
-                        if Instant::now() >= d {
-                            self.print_deadline(start);
-                            return RunResult::Deadline;
-                        }
+                self.print_progress(target, streak, streak_rtt, streak_seq);
+            } else {
+                // Streak-reset path. If the overall timeout fired while we were waiting,
+                // report that instead of a streak reset.
+                if let Some(d) = deadline {
+                    if Instant::now() >= d {
+                        self.print_deadline(start);
+                        return RunResult::Deadline;
                     }
-                    streak = 0;
-                    self.print_no_response(target, seq);
                 }
+                streak = 0;
+                self.print_reset(target, streak_seq, streak_rtt);
             }
 
             // FR-11: attempts budget is checked after each probe, regardless of outcome.
@@ -169,7 +175,13 @@ impl<P: Probe> Scheduler<P> {
         }
     }
 
-    fn print_progress(&self, target: std::net::IpAddr, streak: u32, rtt: Duration, seq: u16) {
+    fn print_progress(
+        &self,
+        target: std::net::IpAddr,
+        streak: u32,
+        rtt: Option<Duration>,
+        seq: u16,
+    ) {
         match self.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {
@@ -189,13 +201,19 @@ impl<P: Probe> Scheduler<P> {
                     streak,
                     self.count,
                     seq,
-                    format_rtt(rtt)
+                    format_rtt_opt(rtt)
                 );
             }
         }
     }
 
-    fn print_final_ok(&self, target: std::net::IpAddr, streak: u32, rtt: Duration, seq: u16) {
+    fn print_final_ok(
+        &self,
+        target: std::net::IpAddr,
+        streak: u32,
+        rtt: Option<Duration>,
+        seq: u16,
+    ) {
         match self.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {
@@ -215,28 +233,34 @@ impl<P: Probe> Scheduler<P> {
                     streak,
                     self.count,
                     seq,
-                    format_rtt(rtt)
+                    format_rtt_opt(rtt)
                 );
             }
         }
     }
 
-    fn print_no_response(&self, target: std::net::IpAddr, seq: u16) {
+    /// Print the "streak reset" line. Phrasing depends on mode: in default mode the
+    /// event is a no-response; in `--not` mode the event is that the host replied.
+    fn print_reset(&self, target: std::net::IpAddr, seq: u16, rtt: Option<Duration>) {
+        let reason = if self.invert { "responded" } else { "no response" };
         match self.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "{}: no response \u{2014} streak reset",
-                    target
+                    "{}: {} \u{2014} streak reset",
+                    target,
+                    reason
                 );
             }
             Verbosity::Verbose => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "{}: no response seq={} \u{2014} streak reset",
+                    "{}: {} seq={} rtt={} \u{2014} streak reset",
                     target,
-                    seq
+                    reason,
+                    seq,
+                    format_rtt_opt(rtt)
                 );
             }
         }
@@ -270,11 +294,16 @@ impl<P: Probe> Scheduler<P> {
     }
 }
 
-fn format_rtt(rtt: Duration) -> String {
-    let ms = rtt.as_secs_f64() * 1000.0;
-    if ms < 1.0 {
-        format!("{:.0}us", rtt.as_micros())
-    } else {
-        format!("{:.2}ms", ms)
+fn format_rtt_opt(rtt: Option<Duration>) -> String {
+    match rtt {
+        Some(rtt) => {
+            let ms = rtt.as_secs_f64() * 1000.0;
+            if ms < 1.0 {
+                format!("{:.0}us", rtt.as_micros())
+            } else {
+                format!("{:.2}ms", ms)
+            }
+        }
+        None => "-".to_string(),
     }
 }
