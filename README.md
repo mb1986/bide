@@ -1,11 +1,11 @@
 # bide
 
-Block until a host is *stably* reachable, defined as N consecutive successful probes.
+Block until a target is *stable*, defined as N consecutive matching probes.
 
-`bide` fills the niche between `ping -c N` (counts total replies, not consecutive) and `wait-for-it` (TCP ports only, no streak semantic). It reads naturally in wait-until-ready scripts:
+`bide` fills the niche between `ping -c N` (counts total replies, not consecutive replies) and TCP-only wait tools. It reads naturally in scripts:
 
 ```sh
-bide -t 30 server01 && ssh server01 ...
+bide -t 30s server01 && ssh server01 ...
 ```
 
 ## Install
@@ -35,86 +35,112 @@ sudo setcap cap_net_raw+ep target/release/bide
 
 ## Usage
 
-```
-bide [OPTIONS] <HOST>
+```text
+bide [OPTIONS] <TARGET>
 ```
 
-| Flag | Long form     | Default | Meaning                                               |
-|------|---------------|---------|-------------------------------------------------------|
-| `-i` | `--interval`  | `3`     | Seconds between probe attempts.                       |
-| `-c` | `--count`     | `3`     | Number of consecutive successful probes required.     |
-| `-n` | `--max-tries` | `0`     | Maximum total probe attempts. `0` means no limit.     |
-| `-t` | `--timeout`   | `0`     | Overall deadline in seconds. `0` means no deadline.   |
-| —    | `--not`       | off     | Invert: wait for the host to *stop* responding.       |
-| `-q` | `--quiet`     | off     | Suppress progress output; only exit code matters.     |
-| `-v` | `--verbose`   | off     | Print each attempt with sequence number and RTT.      |
-| `-h` | `--help`      | —       | Show help.                                            |
-| `-V` | `--version`   | —       | Show version.                                         |
+| Flag | Long form | Default | Meaning |
+|------|-----------|---------|---------|
+| `-i` | `--interval` | `3s` | Time between probe attempts. Bare numbers are seconds; suffixes: `ms`, `s`, `m`, `h`. |
+| `-s` | `--stable` | `3` | Number of consecutive matching probes required. |
+| `-n` | `--max-tries` | `0` | Maximum total probe attempts. `0` means no limit. |
+| `-t` | `--timeout` | `0` | Overall deadline. `0` means no deadline. |
+| - | `--down` | off | Wait for the target to stop responding. |
+| `-q` | `--quiet` | off | Suppress progress output; only exit code matters. |
+| `-v` | `--verbose` | off | Print each attempt with sequence number and RTT. |
+| `-h` | `--help` | - | Show help. |
+| `-V` | `--version` | - | Show version. |
 
-`HOST` is an IPv4 address, IPv6 address, or hostname. DNS is resolved once at startup.
+`TARGET` may be a plain host, IP address, or explicit ICMP URL:
+
+```text
+server01
+192.168.10.10
+icmp://server01
+icmp://[2001:db8::10]
+```
+
+Plain targets use ICMP. `tcp://`, `http://`, and `https://` target forms are reserved for future probe backends and currently return a usage error.
 
 ## How it works
 
-Every `--interval` seconds, one probe is sent. A probe that does not answer before the next tick is a failure and **resets the streak to 0**. As soon as `--count` successes land in a row, the tool exits `0`. If `--timeout` elapses or `--max-tries` is exhausted first, it exits `1`.
+Every `--interval`, one probe is sent. In normal mode, a reply builds the stable streak and a no-response resets it to 0. In `--down` mode, that rule is inverted: a no-response builds the stable streak and a reply resets it.
 
-Events reported during a run:
+As soon as the streak reaches `--stable`, the tool exits `0`. If `--timeout` elapses or `--max-tries` is exhausted first, it exits `1`.
 
-- `no response — streak reset` — default mode: probe timed out; the loop continues.
-- `responded — streak reset` — `--not` mode: probe got a reply; the loop continues.
-- `deadline reached after Ns` — overall `--timeout` hit; the tool exits `1`.
-- `max tries reached after N attempts` — `--max-tries` exhausted; the tool exits `1`.
+### Output
 
-### Inverted mode (`--not`)
+Default output goes to stderr and stays compact:
 
-`--not` flips the streak rule: a no-response counts toward the streak, and a successful reply resets it. Useful for waiting on a host to *go* offline — e.g. confirming a shutdown took effect. **Caveat:** a no-response is indistinguishable from a local network fault (no route, firewall drop), so `--not` is not a safety-critical "host is confirmed gone" signal.
+- Startup: `server01: waiting for 3 stable icmp replies every 3s`
+- Progress: `server01: 1/3`
+- Repeated mismatches: `server01: waiting ..........`
+- Success: `server01: 3/3 ok`
+- Deadline: `server01: deadline reached after 30s`
+- Attempt cap: `server01: max tries reached after 10 attempts`
+
+Waiting dots wrap after 50 dots. Before printing a progress or terminal line, `bide` finishes any active dot line with a newline.
+
+Sample output:
+
+```text
+server01: waiting for 3 stable icmp replies every 3s
+server01: 1/3
+server01: 2/3
+server01: waiting ...
+server01: 1/3
+server01: 2/3
+server01: 3/3 ok
+```
+
+Verbose mode is line-oriented and includes attempt details. Quiet mode emits nothing during normal operation.
 
 ## Examples
 
 ```sh
-# Wait forever until 3 pings in a row succeed, 3 s apart.
-bide 192.168.10.10
+# Wait forever until 3 ICMP replies in a row succeed, 3 s apart.
+bide server01
 
-# 5 s interval, 3 consecutive successes, 30 s overall deadline.
-bide -i 5 -c 3 -t 30 192.168.10.10
+# 5 s interval, 3 consecutive replies, 30 s overall deadline.
+bide -i 5s -s 3 -t 30s 192.168.10.10
+
+# Bare durations are seconds.
+bide -i 5 -t 30 server01
 
 # Bound by attempts instead of wall-clock: give up after 10 probes.
-bide -c 3 -n 10 192.168.10.10
+bide -s 3 -n 10 server01
 
-# Wait up to 60 s for a host to stop responding (confirm shutdown took effect).
-bide --not -t 60 server01 && echo "server01 stopped responding"
+# Wait up to 60 s for a host to stop responding.
+bide --down -t 60s server01 && echo "server01 stopped responding"
 
 # Power-cycle a host and wait for it to stabilize before SSHing in.
 pwrctl off server01 && sleep 5 && pwrctl on server01 && \
-  bide -t 120 server01.lan && \
+  bide -t 2m server01.lan && \
   ssh server01 systemctl status my-service
 ```
 
-Sample output (host briefly flaps, then stabilizes):
+## Exit Codes
 
-```
-192.168.10.10: 1/3
-192.168.10.10: 2/3
-192.168.10.10: no response — streak reset
-192.168.10.10: 1/3
-192.168.10.10: 2/3
-192.168.10.10: 3/3 ok
-```
-
-## Exit codes
-
-| Code  | Meaning                                                                    |
-|-------|----------------------------------------------------------------------------|
-| `0`   | Required consecutive successes achieved.                                   |
-| `1`   | `--timeout` reached or `--max-tries` exhausted without achieving the streak. |
-| `2`   | Invalid arguments or usage error.                                          |
-| `3`   | Host resolution failed or fatal network error (e.g., no permission).       |
-| `130` | Interrupted by SIGINT (Ctrl-C).                                            |
+| Code | Meaning |
+|------|---------|
+| `0` | Required stable streak achieved. |
+| `1` | `--timeout` reached or `--max-tries` exhausted without achieving the streak. |
+| `2` | Invalid arguments, unsupported target scheme, or usage error. |
+| `3` | Host resolution failed or fatal network error, such as missing ICMP permission. |
+| `130` | Interrupted by SIGINT (Ctrl-C). |
+| `143` | Terminated by SIGTERM. |
 
 Progress and errors go to stderr; stdout is reserved for future machine-readable output.
 
-## Probe backends
+## Probe Backends
 
-v1 ships with ICMP echo. The probe layer is abstracted behind an internal trait so TCP (`--tcp 22`) and HTTP (`--http /healthz`) backends can be added without breaking the default invocation. See [REQUIREMENTS.md](REQUIREMENTS.md).
+Current builds ship with ICMP echo only. The target syntax reserves URL forms for future backends:
+
+```text
+tcp://server01:22
+http://server01/healthz
+https://server01/healthz
+```
 
 ## Platform
 

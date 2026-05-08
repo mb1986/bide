@@ -17,60 +17,74 @@ pub enum RunResult {
     MaxTriesReached,
     Interrupted,
     Terminated,
+    InvalidConfig(String),
     ProbeError(ProbeError),
 }
 
 pub struct Scheduler<P: Probe> {
     pub probe: P,
     pub interval: Duration,
-    pub count: u32,
+    pub stable: u32,
     pub max_tries: Option<u32>,
     pub timeout: Option<Duration>,
-    /// If true, invert the streak rule: a no-response builds the streak and a reply resets.
-    pub invert: bool,
+    /// If true, a no-response builds the streak and a reply resets.
+    pub down: bool,
     pub verbosity: Verbosity,
+    pub target_label: String,
+    pub started_at: Instant,
     pub interrupted: Arc<AtomicBool>,
     pub terminated: Arc<AtomicBool>,
 }
 
 impl<P: Probe> Scheduler<P> {
     pub fn run(mut self) -> RunResult {
-        let start = Instant::now();
-        let deadline = self.timeout.map(|t| start + t);
-        let mut streak: u32 = 0;
-        let target = self.probe.target();
-
-        if matches!(self.verbosity, Verbosity::Verbose) {
-            let mut err = std::io::stderr().lock();
-            let _ = writeln!(
-                err,
-                "bide: probe={} target={} interval={}s count={} max-tries={} timeout={} mode={}",
-                self.probe.name(),
-                target,
-                self.interval.as_secs(),
-                self.count,
-                match self.max_tries {
-                    Some(n) => n.to_string(),
-                    None => "none".to_string(),
-                },
-                match self.timeout {
-                    Some(t) => format!("{}s", t.as_secs()),
-                    None => "none".to_string(),
-                },
-                if self.invert { "not" } else { "default" }
-            );
+        if self.interval == Duration::ZERO {
+            return RunResult::InvalidConfig("--interval must be > 0".to_string());
         }
 
-        let mut tick: u32 = 0;
+        let deadline_start = self.started_at;
+        let deadline = match self.timeout {
+            Some(timeout) => match deadline_start.checked_add(timeout) {
+                Some(deadline) => Some(deadline),
+                None => return RunResult::InvalidConfig("--timeout is too large".to_string()),
+            },
+            None => None,
+        };
+        let mut streak: u32 = 0;
+        let mut output = OutputReporter::new(
+            OutputConfig {
+                verbosity: self.verbosity,
+                target: self.target_label.clone(),
+                resolved: self.probe.target(),
+                probe: self.probe.name().to_string(),
+                interval: self.interval,
+                stable: self.stable,
+                max_tries: self.max_tries,
+                timeout: self.timeout,
+                down: self.down,
+            },
+            std::io::stderr(),
+        );
+        output.print_startup();
+
+        let mut tick: u64 = 0;
+        let mut tick_start = Instant::now();
         let mut attempts: u32 = 0;
         loop {
             if let Some(r) = self.check_signals() {
+                output.finish_dot_line();
                 return r;
             }
 
-            // FR-3: each tick starts at a fixed offset from program start.
-            let tick_start = start + self.interval * tick;
             let now = Instant::now();
+            while let Some(next) = tick_start.checked_add(self.interval) {
+                if next > now {
+                    break;
+                }
+                tick_start = next;
+                tick = tick.saturating_add(1);
+            }
+
             if now < tick_start {
                 let wait = tick_start - now;
                 let bounded = match deadline {
@@ -78,6 +92,7 @@ impl<P: Probe> Scheduler<P> {
                     _ => wait,
                 };
                 if let Some(r) = self.interruptible_sleep(bounded) {
+                    output.finish_dot_line();
                     return r;
                 }
             }
@@ -85,14 +100,17 @@ impl<P: Probe> Scheduler<P> {
             // Deadline may have fired while we slept.
             if let Some(d) = deadline {
                 if Instant::now() >= d {
-                    self.print_deadline(start);
+                    output.print_deadline(deadline_start);
                     return RunResult::Deadline;
                 }
             }
 
             // FR-10: a probe attempt is bounded by the next tick, and also by the overall
             // deadline. Whichever is sooner caps the per-probe wait.
-            let next_tick = start + self.interval * tick.saturating_add(1);
+            let next_tick = match tick_start.checked_add(self.interval) {
+                Some(next_tick) => next_tick,
+                None => return RunResult::InvalidConfig("--interval is too large".to_string()),
+            };
             let probe_deadline = match deadline {
                 Some(d) if d < next_tick => d,
                 _ => next_tick,
@@ -101,49 +119,54 @@ impl<P: Probe> Scheduler<P> {
             let seq = (tick & 0xFFFF) as u16;
             let outcome = match self.probe.probe(seq, probe_deadline) {
                 Ok(o) => o,
-                Err(e) => return RunResult::ProbeError(e),
+                Err(e) => {
+                    output.finish_dot_line();
+                    return RunResult::ProbeError(e);
+                }
             };
             // If a signal fired during the probe (EINTR turns into NoResponse), exit
-            // before printing a misleading "streak reset" line.
+            // before printing a misleading reset marker.
             if let Some(r) = self.check_signals() {
+                output.finish_dot_line();
                 return r;
             }
             attempts = attempts.saturating_add(1);
 
-            // FR-12: --not inverts which outcome builds the streak.
+            // --down inverts which outcome builds the streak.
             let (builds_streak, streak_rtt, streak_seq) = match outcome {
-                ProbeOutcome::Success { rtt, seq } => (!self.invert, Some(rtt), seq),
-                ProbeOutcome::NoResponse => (self.invert, None, seq),
+                ProbeOutcome::Success { rtt, seq } => (!self.down, Some(rtt), seq),
+                ProbeOutcome::NoResponse => (self.down, None, seq),
             };
 
             if builds_streak {
                 streak += 1;
-                if streak >= self.count {
-                    self.print_final_ok(target, streak, streak_rtt, streak_seq);
+                if streak >= self.stable {
+                    output.print_final_ok(streak, streak_rtt, streak_seq);
                     return RunResult::Success;
                 }
-                self.print_progress(target, streak, streak_rtt, streak_seq);
+                output.print_progress(streak, streak_rtt, streak_seq);
             } else {
-                // Streak-reset path. If the overall timeout fired while we were waiting,
-                // report that instead of a streak reset.
+                // Reset path. If the overall timeout fired while we were waiting,
+                // report that instead of a reset marker.
                 if let Some(d) = deadline {
                     if Instant::now() >= d {
-                        self.print_deadline(start);
+                        output.print_deadline(deadline_start);
                         return RunResult::Deadline;
                     }
                 }
                 streak = 0;
-                self.print_reset(target, streak_seq, streak_rtt);
+                output.print_reset(streak_seq, streak_rtt);
             }
 
             // FR-11: attempts budget is checked after each probe, regardless of outcome.
             if let Some(max) = self.max_tries {
                 if attempts >= max {
-                    self.print_max_tries(attempts);
+                    output.print_max_tries(attempts);
                     return RunResult::MaxTriesReached;
                 }
             }
 
+            tick_start = next_tick;
             tick = tick.saturating_add(1);
         }
     }
@@ -174,32 +197,96 @@ impl<P: Probe> Scheduler<P> {
             std::thread::sleep(remaining.min(slice));
         }
     }
+}
 
-    fn print_progress(
-        &self,
-        target: std::net::IpAddr,
-        streak: u32,
-        rtt: Option<Duration>,
-        seq: u16,
-    ) {
-        match self.verbosity {
+struct OutputConfig {
+    verbosity: Verbosity,
+    target: String,
+    resolved: std::net::IpAddr,
+    probe: String,
+    interval: Duration,
+    stable: u32,
+    max_tries: Option<u32>,
+    timeout: Option<Duration>,
+    down: bool,
+}
+
+struct OutputReporter<W: Write> {
+    config: OutputConfig,
+    dots: u8,
+    writer: W,
+}
+
+impl<W: Write> OutputReporter<W> {
+    const DOTS_PER_LINE: u8 = 50;
+
+    fn new(config: OutputConfig, writer: W) -> Self {
+        Self {
+            config,
+            dots: 0,
+            writer,
+        }
+    }
+
+    fn print_startup(&mut self) {
+        match self.config.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {
+                let condition = if self.config.down {
+                    "misses".to_string()
+                } else {
+                    format!("{} replies", self.config.probe)
+                };
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    &mut self.writer,
+                    "{}: waiting for {} stable {} every {}",
+                    self.config.target,
+                    self.config.stable,
+                    condition,
+                    format_duration(self.config.interval)
+                );
+            }
+            Verbosity::Verbose => {
+                let _ = writeln!(
+                    &mut self.writer,
+                    "bide: probe={} target={} addr={} interval={} stable={} max-tries={} timeout={} mode={}",
+                    self.config.probe,
+                    self.config.target,
+                    self.config.resolved,
+                    format_duration(self.config.interval),
+                    self.config.stable,
+                    match self.config.max_tries {
+                        Some(n) => n.to_string(),
+                        None => "none".to_string(),
+                    },
+                    match self.config.timeout {
+                        Some(t) => format_duration(t),
+                        None => "none".to_string(),
+                    },
+                    if self.config.down { "down" } else { "up" }
+                );
+            }
+        }
+    }
+
+    fn print_progress(&mut self, streak: u32, rtt: Option<Duration>, seq: u16) {
+        match self.config.verbosity {
+            Verbosity::Quiet => {}
+            Verbosity::Default => {
+                self.finish_dot_line();
+                let _ = writeln!(
+                    &mut self.writer,
                     "{}: {}/{}",
-                    target,
-                    streak,
-                    self.count
+                    self.config.target, streak, self.config.stable
                 );
             }
             Verbosity::Verbose => {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    &mut self.writer,
                     "{}: {}/{} seq={} rtt={}",
-                    target,
+                    self.config.target,
                     streak,
-                    self.count,
+                    self.config.stable,
                     seq,
                     format_rtt_opt(rtt)
                 );
@@ -207,31 +294,24 @@ impl<P: Probe> Scheduler<P> {
         }
     }
 
-    fn print_final_ok(
-        &self,
-        target: std::net::IpAddr,
-        streak: u32,
-        rtt: Option<Duration>,
-        seq: u16,
-    ) {
-        match self.verbosity {
+    fn print_final_ok(&mut self, streak: u32, rtt: Option<Duration>, seq: u16) {
+        match self.config.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {
+                self.finish_dot_line();
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    &mut self.writer,
                     "{}: {}/{} ok",
-                    target,
-                    streak,
-                    self.count
+                    self.config.target, streak, self.config.stable
                 );
             }
             Verbosity::Verbose => {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    &mut self.writer,
                     "{}: {}/{} ok seq={} rtt={}",
-                    target,
+                    self.config.target,
                     streak,
-                    self.count,
+                    self.config.stable,
                     seq,
                     format_rtt_opt(rtt)
                 );
@@ -239,29 +319,20 @@ impl<P: Probe> Scheduler<P> {
         }
     }
 
-    /// Print the "streak reset" line. Phrasing depends on mode: in default mode the
-    /// event is a no-response; in `--not` mode the event is that the host replied.
-    fn print_reset(&self, target: std::net::IpAddr, seq: u16, rtt: Option<Duration>) {
-        let reason = if self.invert {
+    fn print_reset(&mut self, seq: u16, rtt: Option<Duration>) {
+        let reason = if self.config.down {
             "responded"
         } else {
             "no response"
         };
-        match self.verbosity {
+        match self.config.verbosity {
             Verbosity::Quiet => {}
-            Verbosity::Default => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "{}: {} \u{2014} streak reset",
-                    target,
-                    reason
-                );
-            }
+            Verbosity::Default => self.print_dot(),
             Verbosity::Verbose => {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "{}: {} seq={} rtt={} \u{2014} streak reset",
-                    target,
+                    &mut self.writer,
+                    "{}: {} seq={} rtt={} - streak reset",
+                    self.config.target,
                     reason,
                     seq,
                     format_rtt_opt(rtt)
@@ -270,31 +341,51 @@ impl<P: Probe> Scheduler<P> {
         }
     }
 
-    fn print_deadline(&self, start: Instant) {
-        if matches!(self.verbosity, Verbosity::Quiet) {
+    fn print_deadline(&mut self, start: Instant) {
+        if matches!(self.config.verbosity, Verbosity::Quiet) {
             return;
         }
-        let target = self.probe.target();
-        let elapsed = start.elapsed().as_secs();
+        self.finish_dot_line();
+        let elapsed = start.elapsed();
         let _ = writeln!(
-            std::io::stderr().lock(),
-            "{}: deadline reached after {}s",
-            target,
-            elapsed
+            &mut self.writer,
+            "{}: deadline reached after {}",
+            self.config.target,
+            format_duration(elapsed)
         );
     }
 
-    fn print_max_tries(&self, attempts: u32) {
-        if matches!(self.verbosity, Verbosity::Quiet) {
+    fn print_max_tries(&mut self, attempts: u32) {
+        if matches!(self.config.verbosity, Verbosity::Quiet) {
             return;
         }
-        let target = self.probe.target();
+        self.finish_dot_line();
         let _ = writeln!(
-            std::io::stderr().lock(),
+            &mut self.writer,
             "{}: max tries reached after {} attempts",
-            target,
-            attempts
+            self.config.target, attempts
         );
+    }
+
+    fn print_dot(&mut self) {
+        if self.dots == 0 {
+            let _ = write!(&mut self.writer, "{}: waiting ", self.config.target);
+        }
+        let _ = write!(&mut self.writer, ".");
+        self.dots += 1;
+        if self.dots >= Self::DOTS_PER_LINE {
+            let _ = writeln!(&mut self.writer);
+            self.dots = 0;
+        }
+        let _ = self.writer.flush();
+    }
+
+    fn finish_dot_line(&mut self) {
+        if self.dots == 0 {
+            return;
+        }
+        let _ = writeln!(&mut self.writer);
+        self.dots = 0;
     }
 }
 
@@ -309,5 +400,201 @@ fn format_rtt_opt(rtt: Option<Duration>) -> String {
             }
         }
         None => "-".to_string(),
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration == Duration::ZERO {
+        return "0".to_string();
+    }
+    if duration.subsec_millis() != 0 || duration.as_secs() == 0 {
+        return format!("{}ms", duration.as_millis());
+    }
+
+    let secs = duration.as_secs();
+    if secs % 3600 == 0 {
+        format!("{}h", secs / 3600)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn formats_durations_for_display() {
+        assert_eq!(format_duration(Duration::ZERO), "0");
+        assert_eq!(format_duration(Duration::from_millis(500)), "500ms");
+        assert_eq!(format_duration(Duration::from_secs(3)), "3s");
+        assert_eq!(format_duration(Duration::from_secs(120)), "2m");
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h");
+        assert_eq!(format_duration(Duration::from_secs(90)), "90s");
+    }
+
+    #[test]
+    fn default_dots_wrap_and_finish_before_progress() {
+        let mut output = OutputReporter::new(test_config(Verbosity::Default, false), Vec::new());
+
+        for seq in 0..51 {
+            output.print_reset(seq, None);
+        }
+        output.print_progress(1, None, 51);
+
+        let text = String::from_utf8(output.writer).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "server01: waiting {}\nserver01: waiting .\nserver01: 1/3\n",
+                ".".repeat(50)
+            )
+        );
+    }
+
+    #[test]
+    fn default_deadline_uses_duration_formatting() {
+        let mut output = OutputReporter::new(test_config(Verbosity::Default, false), Vec::new());
+
+        output.print_reset(0, None);
+        output.print_deadline(Instant::now() - Duration::from_millis(500));
+
+        let text = String::from_utf8(output.writer).unwrap();
+        assert!(text.starts_with("server01: waiting .\n"));
+        assert!(text.contains("server01: deadline reached after "));
+        assert!(text.contains("ms\n"));
+        assert!(!text.contains("after 0s"));
+    }
+
+    #[test]
+    fn verbose_down_reset_is_line_oriented() {
+        let mut output = OutputReporter::new(test_config(Verbosity::Verbose, true), Vec::new());
+
+        output.print_startup();
+        output.print_reset(7, Some(Duration::from_millis(2)));
+
+        let text = String::from_utf8(output.writer).unwrap();
+        assert_eq!(
+            text,
+            "bide: probe=icmp target=server01 addr=192.0.2.1 interval=3s stable=3 max-tries=none timeout=none mode=down\nserver01: responded seq=7 rtt=2.00ms - streak reset\n"
+        );
+    }
+
+    #[test]
+    fn quiet_output_is_empty() {
+        let mut output = OutputReporter::new(test_config(Verbosity::Quiet, false), Vec::new());
+
+        output.print_startup();
+        output.print_reset(1, None);
+        output.print_progress(1, None, 1);
+        output.print_final_ok(3, None, 3);
+        output.print_deadline(Instant::now());
+        output.print_max_tries(10);
+
+        assert!(output.writer.is_empty());
+    }
+
+    #[test]
+    fn down_mode_builds_streak_on_no_response() {
+        let scheduler = Scheduler {
+            probe: FakeProbe {
+                outcomes: vec![ProbeOutcome::NoResponse, ProbeOutcome::NoResponse],
+            },
+            interval: Duration::from_millis(1),
+            stable: 2,
+            max_tries: Some(2),
+            timeout: Some(Duration::from_secs(1)),
+            down: true,
+            verbosity: Verbosity::Quiet,
+            target_label: "server01".to_string(),
+            started_at: Instant::now(),
+            interrupted: Default::default(),
+            terminated: Default::default(),
+        };
+
+        assert!(matches!(scheduler.run(), RunResult::Success));
+    }
+
+    #[test]
+    fn scheduler_does_not_replay_ticks_lost_before_run_starts() {
+        let saw_expired_deadline = Arc::new(AtomicBool::new(false));
+        let scheduler = Scheduler {
+            probe: DeadlineProbe {
+                saw_expired_deadline: Arc::clone(&saw_expired_deadline),
+            },
+            interval: Duration::from_millis(10),
+            stable: 1,
+            max_tries: Some(1),
+            timeout: None,
+            down: false,
+            verbosity: Verbosity::Quiet,
+            target_label: "server01".to_string(),
+            started_at: Instant::now() - Duration::from_millis(100),
+            interrupted: Default::default(),
+            terminated: Default::default(),
+        };
+
+        assert!(matches!(scheduler.run(), RunResult::Success));
+        assert!(!saw_expired_deadline.load(Ordering::SeqCst));
+    }
+
+    fn test_config(verbosity: Verbosity, down: bool) -> OutputConfig {
+        OutputConfig {
+            verbosity,
+            target: "server01".to_string(),
+            resolved: IpAddr::from([192, 0, 2, 1]),
+            probe: "icmp".to_string(),
+            interval: Duration::from_secs(3),
+            stable: 3,
+            max_tries: None,
+            timeout: None,
+            down,
+        }
+    }
+
+    struct FakeProbe {
+        outcomes: Vec<ProbeOutcome>,
+    }
+
+    impl Probe for FakeProbe {
+        fn target(&self) -> IpAddr {
+            IpAddr::from([192, 0, 2, 1])
+        }
+
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        fn probe(&mut self, _seq: u16, _deadline: Instant) -> Result<ProbeOutcome, ProbeError> {
+            Ok(self.outcomes.remove(0))
+        }
+    }
+
+    struct DeadlineProbe {
+        saw_expired_deadline: Arc<AtomicBool>,
+    }
+
+    impl Probe for DeadlineProbe {
+        fn target(&self) -> IpAddr {
+            IpAddr::from([192, 0, 2, 1])
+        }
+
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        fn probe(&mut self, seq: u16, deadline: Instant) -> Result<ProbeOutcome, ProbeError> {
+            if Instant::now() >= deadline {
+                self.saw_expired_deadline.store(true, Ordering::SeqCst);
+            }
+            Ok(ProbeOutcome::Success {
+                rtt: Duration::ZERO,
+                seq,
+            })
+        }
     }
 }

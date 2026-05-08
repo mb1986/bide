@@ -1,9 +1,9 @@
 [package]
 name = "bide"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Block until a host is stably reachable with consecutive probe semantics."
+description = "Block until a target reaches a stable probe state."
 repository = "https://github.com/mb1986/bide"
 readme = "README.md"
 license = "MIT"

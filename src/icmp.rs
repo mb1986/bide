@@ -48,14 +48,18 @@ impl IcmpProbe {
     }
 
     fn build_echo_request(&self, seq: u16) -> [u8; 16] {
-        let (typ, is_v6) = match self.target {
+        Self::build_echo_request_for(self.target, self.ident, seq)
+    }
+
+    fn build_echo_request_for(target: IpAddr, ident: u16, seq: u16) -> [u8; 16] {
+        let (typ, is_v6) = match target {
             IpAddr::V4(_) => (ICMPV4_ECHO_REQUEST, false),
             IpAddr::V6(_) => (ICMPV6_ECHO_REQUEST, true),
         };
         let mut pkt = [0u8; 16];
         pkt[0] = typ;
         pkt[1] = 0;
-        pkt[4..6].copy_from_slice(&self.ident.to_be_bytes());
+        pkt[4..6].copy_from_slice(&ident.to_be_bytes());
         pkt[6..8].copy_from_slice(&seq.to_be_bytes());
         pkt[8..16].copy_from_slice(b"bidebide");
         if !is_v6 {
@@ -94,6 +98,10 @@ impl Probe for IcmpProbe {
     }
 
     fn probe(&mut self, seq: u16, deadline: Instant) -> Result<ProbeOutcome, ProbeError> {
+        if Instant::now() >= deadline {
+            return Ok(ProbeOutcome::NoResponse);
+        }
+
         let pkt = self.build_echo_request(seq);
         let dest: SocketAddr = SocketAddr::new(self.target, 0);
         let started = Instant::now();
@@ -179,13 +187,7 @@ mod tests {
 
     #[test]
     fn echo_request_has_correct_type_v4() {
-        let p = IcmpProbe {
-            socket: Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))
-                .expect("needs unprivileged ICMP to run test"),
-            target: IpAddr::from([127u8, 0, 0, 1]),
-            ident: 0x1234,
-        };
-        let pkt = p.build_echo_request(7);
+        let pkt = IcmpProbe::build_echo_request_for(IpAddr::from([127u8, 0, 0, 1]), 0x1234, 7);
         assert_eq!(pkt[0], ICMPV4_ECHO_REQUEST);
         assert_eq!(pkt[1], 0);
         assert_eq!(u16::from_be_bytes([pkt[4], pkt[5]]), 0x1234);
