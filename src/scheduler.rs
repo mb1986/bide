@@ -44,7 +44,7 @@ impl<P: Probe> Scheduler<P> {
             let mut err = std::io::stderr().lock();
             let _ = writeln!(
                 err,
-                "responds: probe={} target={} interval={}s count={} max-tries={} timeout={} mode={}",
+                "bide: probe={} target={} interval={}s count={} max-tries={} timeout={} mode={}",
                 self.probe.name(),
                 target,
                 self.interval.as_secs(),
@@ -242,7 +242,11 @@ impl<P: Probe> Scheduler<P> {
     /// Print the "streak reset" line. Phrasing depends on mode: in default mode the
     /// event is a no-response; in `--not` mode the event is that the host replied.
     fn print_reset(&self, target: std::net::IpAddr, seq: u16, rtt: Option<Duration>) {
-        let reason = if self.invert { "responded" } else { "no response" };
+        let reason = if self.invert {
+            "responded"
+        } else {
+            "no response"
+        };
         match self.verbosity {
             Verbosity::Quiet => {}
             Verbosity::Default => {

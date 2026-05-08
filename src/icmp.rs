@@ -57,7 +57,7 @@ impl IcmpProbe {
         pkt[1] = 0;
         pkt[4..6].copy_from_slice(&self.ident.to_be_bytes());
         pkt[6..8].copy_from_slice(&seq.to_be_bytes());
-        pkt[8..16].copy_from_slice(b"responds");
+        pkt[8..16].copy_from_slice(b"bidebide");
         if !is_v6 {
             let cs = checksum(&pkt);
             pkt[2..4].copy_from_slice(&cs.to_be_bytes());

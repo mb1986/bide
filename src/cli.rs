@@ -2,10 +2,10 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "responds",
+    name = "bide",
     version,
     about = "Block until a host is stably reachable (N consecutive successful probes).",
-    long_about = "responds sends one probe per --interval tick and exits 0 as soon as \
+    long_about = "bide sends one probe per --interval tick and exits 0 as soon as \
                   --count consecutive probes succeed. Any failure resets the streak. \
                   Exits 1 if --timeout elapses first."
 )]

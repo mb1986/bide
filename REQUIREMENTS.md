@@ -1,8 +1,8 @@
-# `responds` — Requirements
+# `bide` — Requirements
 
 A small Linux command-line tool that blocks until a remote host is *stably* reachable, defined as N consecutive successful probes. Intended for use in scripts that need to wait for a machine to come back online (after a reboot, power cycle, DHCP lease renewal, etc.) before proceeding.
 
-Reads as a predicate at the call site: `responds -t 30 server01 && ssh server01 ...`
+Reads naturally in wait-until-ready scripts: `bide -t 30 server01 && ssh server01 ...`
 
 Also exposes a tries-based cap (`-n`) for callers that prefer to bound by attempts rather than wall-clock time, and an inversion flag (`--not`) that waits for a host to *stop* responding rather than start.
 
@@ -15,19 +15,19 @@ Existing tools have gaps:
 - `wait-for-it` / `wait-for` test TCP ports, not ICMP, and have no "N consecutive" logic.
 - `fping` reports per-packet results without a "settle until stable" mode.
 
-`responds` fills the specific niche of *"block my script until this host is reliably up,"* and does so with a name that reads naturally in shell pipelines and stays accurate as probe types expand beyond ICMP.
+`bide` fills the specific niche of *"block my script until this host is reliably up,"* and does so with a short name that reflects waiting and stays accurate as probe types expand beyond ICMP.
 
 ## Synopsis
 
 ```
-responds [OPTIONS] <HOST>
+bide [OPTIONS] <HOST>
 ```
 
 ## Probe model
 
-`responds` is built around a pluggable probe concept: something that, given a target, returns success or failure within a bounded time. The tool itself handles scheduling, streak tracking, deadlines, and exit codes — the probe backend only answers "did the host respond?"
+`bide` is built around a pluggable probe concept: something that, given a target, returns success or failure within a bounded time. The tool itself handles scheduling, streak tracking, deadlines, and exit codes — the probe backend only answers "did the host respond?"
 
-**v1 ships with ICMP only** (see FR-1). TCP and HTTP probes are explicit future additions — see [Planned probe modes](#planned-probe-modes-post-v1). Defaulting to ICMP when no probe is specified preserves the simple `responds server01` invocation indefinitely.
+**v1 ships with ICMP only** (see FR-1). TCP and HTTP probes are explicit future additions — see [Planned probe modes](#planned-probe-modes-post-v1). Defaulting to ICMP when no probe is specified preserves the simple `bide server01` invocation indefinitely.
 
 ## Behavior
 
@@ -130,20 +130,20 @@ Verbose: add RTT, sequence numbers, and the active probe backend. Quiet: emit no
 
 ```bash
 # Default: wait forever until 3 ICMP pings in a row succeed, 3 s apart.
-responds 192.168.10.10
+bide 192.168.10.10
 
 # 5 s interval, 3 consecutive successes, 30 s overall deadline.
-responds -i 5 -c 3 -t 30 192.168.10.10
+bide -i 5 -c 3 -t 30 192.168.10.10
 
 # Bound by attempts instead of wall-clock: give up after 10 probes.
-responds -c 3 -n 10 192.168.10.10
+bide -c 3 -n 10 192.168.10.10
 
 # Wait up to 60 s for a host to go silent (e.g. confirm a shutdown has taken).
-responds --not -t 60 server01 && echo "server01 stopped responding"
+bide --not -t 60 server01 && echo "server01 stopped responding"
 
 # In a script: power-cycle a host and wait for it to come back up.
 pwrctl off server01 && sleep 5 && pwrctl on server01 && \
-  responds -t 120 server01.lan && \
+  bide -t 120 server01.lan && \
   ssh server01 systemctl status my-service
 ```
 
@@ -151,8 +151,8 @@ pwrctl off server01 && sleep 5 && pwrctl on server01 && \
 
 Documented here so v1 architecture accommodates them without CLI breakage.
 
-- **TCP**: `responds --tcp 22 server01` — success = TCP handshake completes within `--interval`.
-- **HTTP**: `responds --http /healthz server01` — success = 2xx response within `--interval`. Optional `--expect-status`.
+- **TCP**: `bide --tcp 22 server01` — success = TCP handshake completes within `--interval`.
+- **HTTP**: `bide --http /healthz server01` — success = 2xx response within `--interval`. Optional `--expect-status`.
 - Probe-selection flags are mutually exclusive; default (no probe flag) remains ICMP.
 
 Adding HTTP in particular may justify reintroducing a `--probe-timeout` flag later, since realistic HTTP health checks can legitimately take longer than a sensible ICMP/TCP interval. If that happens, `--probe-timeout` becomes optional and defaults to `--interval` — preserving v1 semantics.
@@ -171,4 +171,4 @@ Adding HTTP in particular may justify reintroducing a `--probe-timeout` flag lat
 - Should `-c 1` be explicitly supported as "single-success mode," or is that redundant with plain `ping -c 1 -W <sec>` (using ping's own per-packet-wait flag)? (Lean: support it for CLI consistency.)
 - On platforms without unprivileged ICMP, should the tool fail cleanly or attempt to use `CAP_NET_RAW`-granted capability automatically? (Lean: require `CAP_NET_RAW` or unprivileged ICMP; fail otherwise, with a clear message pointing to `setcap` or `ping_group_range`.)
 - Should `--interval 0` be allowed (back-to-back probes)? (Lean: no, reject with exit 2 — this is a "wait" tool, not a flooder.)
-- For TCP/HTTP modes, should the probe selection be a flag (`--tcp 22`) or a subcommand (`responds tcp 22 ...`)? (Lean: flag, to keep the invocation flat and the default case unchanged.)
+- For TCP/HTTP modes, should the probe selection be a flag (`--tcp 22`) or a subcommand (`bide tcp 22 ...`)? (Lean: flag, to keep the invocation flat and the default case unchanged.)

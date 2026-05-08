@@ -1,14 +1,20 @@
-# responds
+# bide
 
 Block until a host is *stably* reachable, defined as N consecutive successful probes.
 
-`responds` fills the niche between `ping -c N` (counts total replies, not consecutive) and `wait-for-it` (TCP ports only, no streak semantic). It reads as a predicate at the call site:
+`bide` fills the niche between `ping -c N` (counts total replies, not consecutive) and `wait-for-it` (TCP ports only, no streak semantic). It reads naturally in wait-until-ready scripts:
 
 ```sh
-responds -t 30 server01 && ssh server01 ...
+bide -t 30 server01 && ssh server01 ...
 ```
 
 ## Install
+
+```sh
+cargo install bide
+```
+
+For a local checkout:
 
 ```sh
 cargo install --path .
@@ -18,19 +24,19 @@ Or build a release binary:
 
 ```sh
 cargo build --release
-# binary at target/release/responds
+# binary at target/release/bide
 ```
 
 Requires Linux with unprivileged ICMP enabled (the default on modern kernels). If opening the socket fails with `EACCES`, either widen `net.ipv4.ping_group_range` or grant the capability:
 
 ```sh
-sudo setcap cap_net_raw+ep target/release/responds
+sudo setcap cap_net_raw+ep target/release/bide
 ```
 
 ## Usage
 
 ```
-responds [OPTIONS] <HOST>
+bide [OPTIONS] <HOST>
 ```
 
 | Flag | Long form     | Default | Meaning                                               |
@@ -66,20 +72,20 @@ Events reported during a run:
 
 ```sh
 # Wait forever until 3 pings in a row succeed, 3 s apart.
-responds 192.168.10.10
+bide 192.168.10.10
 
 # 5 s interval, 3 consecutive successes, 30 s overall deadline.
-responds -i 5 -c 3 -t 30 192.168.10.10
+bide -i 5 -c 3 -t 30 192.168.10.10
 
 # Bound by attempts instead of wall-clock: give up after 10 probes.
-responds -c 3 -n 10 192.168.10.10
+bide -c 3 -n 10 192.168.10.10
 
 # Wait up to 60 s for a host to stop responding (confirm shutdown took effect).
-responds --not -t 60 server01 && echo "server01 stopped responding"
+bide --not -t 60 server01 && echo "server01 stopped responding"
 
 # Power-cycle a host and wait for it to stabilize before SSHing in.
 pwrctl off server01 && sleep 5 && pwrctl on server01 && \
-  responds -t 120 server01.lan && \
+  bide -t 120 server01.lan && \
   ssh server01 systemctl status my-service
 ```
 

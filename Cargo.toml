@@ -1,7 +1,14 @@
 [package]
-name = "responds"
+name = "bide"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Block until a host is stably reachable with consecutive probe semantics."
+repository = "https://github.com/mb1986/bide"
+readme = "README.md"
+license = "MIT"
+keywords = ["cli", "icmp", "network", "ping", "wait"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

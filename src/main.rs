@@ -17,18 +17,18 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     if cli.interval == 0 {
-        eprintln!("responds: --interval must be > 0 (this is a wait tool, not a flooder)");
+        eprintln!("bide: --interval must be > 0 (this is a wait tool, not a flooder)");
         return ExitCode::from(2);
     }
     if cli.count == 0 {
-        eprintln!("responds: --count must be > 0");
+        eprintln!("bide: --count must be > 0");
         return ExitCode::from(2);
     }
 
     let addr = match resolve(&cli.host) {
         Ok(a) => a,
         Err(msg) => {
-            eprintln!("responds: {}", msg);
+            eprintln!("bide: {}", msg);
             return ExitCode::from(3);
         }
     };
@@ -38,20 +38,20 @@ fn main() -> ExitCode {
     if let Err(e) =
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupted))
     {
-        eprintln!("responds: failed to install SIGINT handler: {}", e);
+        eprintln!("bide: failed to install SIGINT handler: {}", e);
         return ExitCode::from(3);
     }
     if let Err(e) =
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&terminated))
     {
-        eprintln!("responds: failed to install SIGTERM handler: {}", e);
+        eprintln!("bide: failed to install SIGTERM handler: {}", e);
         return ExitCode::from(3);
     }
 
     let probe = match IcmpProbe::new(addr) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("responds: {}", e.message);
+            eprintln!("bide: {}", e.message);
             return ExitCode::from(3);
         }
     };
@@ -90,7 +90,7 @@ fn main() -> ExitCode {
         RunResult::Interrupted => ExitCode::from(130),
         RunResult::Terminated => ExitCode::from(143),
         RunResult::ProbeError(e) => {
-            eprintln!("responds: {}", e.message);
+            eprintln!("bide: {}", e.message);
             ExitCode::from(3)
         }
     }
@@ -102,7 +102,10 @@ fn resolve(host: &str) -> Result<IpAddr, String> {
     match (host, 0u16).to_socket_addrs() {
         Ok(mut iter) => match iter.next() {
             Some(sa) => Ok(sa.ip()),
-            None => Err(format!("unable to resolve '{}': no addresses returned", host)),
+            None => Err(format!(
+                "unable to resolve '{}': no addresses returned",
+                host
+            )),
         },
         Err(e) => Err(format!("unable to resolve '{}': {}", host, e)),
     }
