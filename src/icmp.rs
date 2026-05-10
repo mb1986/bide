@@ -130,9 +130,7 @@ impl Probe for IcmpProbe {
                 Ok((n, from)) => {
                     let data: &[u8] =
                         unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-                    let from_matches = from
-                        .as_socket()
-                        .is_some_and(|sa| sa.ip() == self.target);
+                    let from_matches = from.as_socket().is_some_and(|sa| sa.ip() == self.target);
                     if from_matches && self.is_matching_reply(data, seq) {
                         return Ok(ProbeOutcome::Success {
                             rtt: started.elapsed(),
