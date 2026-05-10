@@ -26,14 +26,13 @@ impl IcmpProbe {
             match e.raw_os_error() {
                 Some(c) if c == libc::EACCES || c == libc::EPERM => ProbeError {
                     message: format!(
-                        "unable to open unprivileged ICMP socket ({}). \
+                        "unable to open unprivileged ICMP socket ({e}). \
                          On Linux, either widen `sysctl net.ipv4.ping_group_range` to include \
-                         your GID, or grant CAP_NET_RAW via `sudo setcap cap_net_raw+ep <binary>`.",
-                        e
+                         your GID, or grant CAP_NET_RAW via `sudo setcap cap_net_raw+ep <binary>`."
                     ),
                 },
                 _ => ProbeError {
-                    message: format!("failed to open ICMP socket: {}", e),
+                    message: format!("failed to open ICMP socket: {e}"),
                 },
             }
         })?;
@@ -78,7 +77,7 @@ impl IcmpProbe {
             IpAddr::V4(_) => ICMPV4_ECHO_REPLY,
             IpAddr::V6(_) => ICMPV6_ECHO_REPLY,
         };
-        if data[0] != expected_type {
+        if data[0] != expected_type || data[1] != 0 {
             return false;
         }
         let rseq = u16::from_be_bytes([data[6], data[7]]);
@@ -93,7 +92,7 @@ impl Probe for IcmpProbe {
         self.target
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "icmp"
     }
 
@@ -109,7 +108,7 @@ impl Probe for IcmpProbe {
         self.socket
             .send_to(&pkt, &dest.into())
             .map_err(|e| ProbeError {
-                message: format!("send failed: {}", e),
+                message: format!("send failed: {e}"),
             })?;
 
         loop {
@@ -121,22 +120,27 @@ impl Probe for IcmpProbe {
             self.socket
                 .set_read_timeout(Some(remaining))
                 .map_err(|e| ProbeError {
-                    message: format!("setsockopt(SO_RCVTIMEO): {}", e),
+                    message: format!("setsockopt(SO_RCVTIMEO): {e}"),
                 })?;
 
+            // 1500 covers Ethernet MTU; the kernel strips the IP header on SOCK_DGRAM
+            // ICMP, so this is more than enough for an echo reply payload.
             let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
             match self.socket.recv_from(&mut buf) {
-                Ok((n, _from)) => {
+                Ok((n, from)) => {
                     let data: &[u8] =
-                        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                    if self.is_matching_reply(data, seq) {
+                        unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+                    let from_matches = from
+                        .as_socket()
+                        .is_some_and(|sa| sa.ip() == self.target);
+                    if from_matches && self.is_matching_reply(data, seq) {
                         return Ok(ProbeOutcome::Success {
                             rtt: started.elapsed(),
                             seq,
                         });
                     }
-                    // Stray packet (different seq, or echo request we sent being looped back
-                    // on some configurations). Keep waiting until deadline.
+                    // Stray packet (different seq, wrong source, or echo request we sent
+                    // being looped back on some configurations). Keep waiting until deadline.
                 }
                 Err(e)
                     if e.kind() == io::ErrorKind::WouldBlock
@@ -149,7 +153,7 @@ impl Probe for IcmpProbe {
                 }
                 Err(e) => {
                     return Err(ProbeError {
-                        message: format!("recv failed: {}", e),
+                        message: format!("recv failed: {e}"),
                     });
                 }
             }
@@ -162,16 +166,18 @@ fn checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
     while i + 1 < data.len() {
-        sum = sum.wrapping_add(u16::from_be_bytes([data[i], data[i + 1]]) as u32);
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([data[i], data[i + 1]])));
         i += 2;
     }
     if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
+        sum = sum.wrapping_add(u32::from(data[i]) << 8);
     }
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    !(sum as u16)
+    #[allow(clippy::cast_possible_truncation)]
+    let folded = sum as u16;
+    !folded
 }
 
 #[cfg(test)]

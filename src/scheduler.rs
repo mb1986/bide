@@ -56,7 +56,7 @@ impl<P: Probe> Scheduler<P> {
                 verbosity: self.verbosity,
                 target: self.target_label.clone(),
                 resolved: self.probe.target(),
-                probe: self.probe.name().to_string(),
+                probe: self.probe.name(),
                 interval: self.interval,
                 stable: self.stable,
                 max_tries: self.max_tries,
@@ -67,7 +67,7 @@ impl<P: Probe> Scheduler<P> {
         );
         output.print_startup();
 
-        let mut tick: u64 = 0;
+        let mut tick: u32 = 0;
         let mut tick_start = Instant::now();
         let mut attempts: u32 = 0;
         loop {
@@ -107,9 +107,8 @@ impl<P: Probe> Scheduler<P> {
 
             // FR-10: a probe attempt is bounded by the next tick, and also by the overall
             // deadline. Whichever is sooner caps the per-probe wait.
-            let next_tick = match tick_start.checked_add(self.interval) {
-                Some(next_tick) => next_tick,
-                None => return RunResult::InvalidConfig("--interval is too large".to_string()),
+            let Some(next_tick) = tick_start.checked_add(self.interval) else {
+                return RunResult::InvalidConfig("--interval is too large".to_string());
             };
             let probe_deadline = match deadline {
                 Some(d) if d < next_tick => d,
@@ -203,7 +202,7 @@ struct OutputConfig {
     verbosity: Verbosity,
     target: String,
     resolved: std::net::IpAddr,
-    probe: String,
+    probe: &'static str,
     interval: Duration,
     stable: u32,
     max_tries: Option<u32>,
@@ -396,7 +395,7 @@ fn format_rtt_opt(rtt: Option<Duration>) -> String {
             if ms < 1.0 {
                 format!("{:.0}us", rtt.as_micros())
             } else {
-                format!("{:.2}ms", ms)
+                format!("{ms:.2}ms")
             }
         }
         None => "-".to_string(),
@@ -417,7 +416,7 @@ fn format_duration(duration: Duration) -> String {
     } else if secs % 60 == 0 {
         format!("{}m", secs / 60)
     } else {
-        format!("{}s", secs)
+        format!("{secs}s")
     }
 }
 
@@ -461,7 +460,11 @@ mod tests {
         let mut output = OutputReporter::new(test_config(Verbosity::Default, false), Vec::new());
 
         output.print_reset(0, None);
-        output.print_deadline(Instant::now() - Duration::from_millis(500));
+        output.print_deadline(
+            Instant::now()
+                .checked_sub(Duration::from_millis(500))
+                .unwrap(),
+        );
 
         let text = String::from_utf8(output.writer).unwrap();
         assert!(text.starts_with("server01: waiting .\n"));
@@ -512,8 +515,63 @@ mod tests {
             verbosity: Verbosity::Quiet,
             target_label: "server01".to_string(),
             started_at: Instant::now(),
-            interrupted: Default::default(),
-            terminated: Default::default(),
+            interrupted: Arc::default(),
+            terminated: Arc::default(),
+        };
+
+        assert!(matches!(scheduler.run(), RunResult::Success));
+    }
+
+    #[test]
+    fn stable_one_succeeds_on_first_match() {
+        let scheduler = Scheduler {
+            probe: FakeProbe {
+                outcomes: vec![ProbeOutcome::Success {
+                    rtt: Duration::ZERO,
+                    seq: 0,
+                }],
+            },
+            interval: Duration::from_millis(1),
+            stable: 1,
+            max_tries: Some(1),
+            timeout: Some(Duration::from_secs(1)),
+            down: false,
+            verbosity: Verbosity::Quiet,
+            target_label: "server01".to_string(),
+            started_at: Instant::now(),
+            interrupted: Arc::default(),
+            terminated: Arc::default(),
+        };
+
+        assert!(matches!(scheduler.run(), RunResult::Success));
+    }
+
+    #[test]
+    fn down_mode_reply_resets_streak() {
+        // Sequence under --down (NoResponse builds, Success resets):
+        // miss -> 1, reply -> 0 (reset), miss -> 1, miss -> 2 -> Success at stable=2.
+        let scheduler = Scheduler {
+            probe: FakeProbe {
+                outcomes: vec![
+                    ProbeOutcome::NoResponse,
+                    ProbeOutcome::Success {
+                        rtt: Duration::ZERO,
+                        seq: 1,
+                    },
+                    ProbeOutcome::NoResponse,
+                    ProbeOutcome::NoResponse,
+                ],
+            },
+            interval: Duration::from_millis(1),
+            stable: 2,
+            max_tries: Some(4),
+            timeout: Some(Duration::from_secs(1)),
+            down: true,
+            verbosity: Verbosity::Quiet,
+            target_label: "server01".to_string(),
+            started_at: Instant::now(),
+            interrupted: Arc::default(),
+            terminated: Arc::default(),
         };
 
         assert!(matches!(scheduler.run(), RunResult::Success));
@@ -533,9 +591,11 @@ mod tests {
             down: false,
             verbosity: Verbosity::Quiet,
             target_label: "server01".to_string(),
-            started_at: Instant::now() - Duration::from_millis(100),
-            interrupted: Default::default(),
-            terminated: Default::default(),
+            started_at: Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .unwrap(),
+            interrupted: Arc::default(),
+            terminated: Arc::default(),
         };
 
         assert!(matches!(scheduler.run(), RunResult::Success));
@@ -547,7 +607,7 @@ mod tests {
             verbosity,
             target: "server01".to_string(),
             resolved: IpAddr::from([192, 0, 2, 1]),
-            probe: "icmp".to_string(),
+            probe: "icmp",
             interval: Duration::from_secs(3),
             stable: 3,
             max_tries: None,
@@ -565,7 +625,7 @@ mod tests {
             IpAddr::from([192, 0, 2, 1])
         }
 
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "fake"
         }
 
@@ -583,7 +643,7 @@ mod tests {
             IpAddr::from([192, 0, 2, 1])
         }
 
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "fake"
         }
 

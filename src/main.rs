@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let target = match parse_target(&cli.target) {
         Ok(t) => t,
         Err(msg) => {
-            eprintln!("bide: {}", msg);
+            eprintln!("bide: {msg}");
             return ExitCode::from(2);
         }
     };
@@ -45,23 +45,43 @@ fn main() -> ExitCode {
     let addr = match resolve(target.host()) {
         Ok(a) => a,
         Err(msg) => {
-            eprintln!("bide: {}", msg);
+            eprintln!("bide: {msg}");
             return ExitCode::from(3);
         }
     };
 
     let interrupted = Arc::new(AtomicBool::new(false));
     let terminated = Arc::new(AtomicBool::new(false));
+    // Double-signal escape: register the conditional shutdown FIRST so it observes the
+    // flag BEFORE the flag-setter flips it. First signal: shutdown handler sees a clear
+    // flag and does nothing; flag-setter then arms it. Second signal: shutdown handler
+    // sees the armed flag and force-exits, in case the main loop is wedged.
+    if let Err(e) = signal_hook::flag::register_conditional_shutdown(
+        signal_hook::consts::SIGINT,
+        130,
+        Arc::clone(&interrupted),
+    ) {
+        eprintln!("bide: failed to install SIGINT handler: {e}");
+        return ExitCode::from(3);
+    }
     if let Err(e) =
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupted))
     {
-        eprintln!("bide: failed to install SIGINT handler: {}", e);
+        eprintln!("bide: failed to install SIGINT handler: {e}");
+        return ExitCode::from(3);
+    }
+    if let Err(e) = signal_hook::flag::register_conditional_shutdown(
+        signal_hook::consts::SIGTERM,
+        143,
+        Arc::clone(&terminated),
+    ) {
+        eprintln!("bide: failed to install SIGTERM handler: {e}");
         return ExitCode::from(3);
     }
     if let Err(e) =
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&terminated))
     {
-        eprintln!("bide: failed to install SIGTERM handler: {}", e);
+        eprintln!("bide: failed to install SIGTERM handler: {e}");
         return ExitCode::from(3);
     }
 
@@ -109,7 +129,7 @@ fn main() -> ExitCode {
         RunResult::Interrupted => ExitCode::from(130),
         RunResult::Terminated => ExitCode::from(143),
         RunResult::InvalidConfig(msg) => {
-            eprintln!("bide: {}", msg);
+            eprintln!("bide: {msg}");
             ExitCode::from(2)
         }
         RunResult::ProbeError(e) => {
@@ -164,12 +184,10 @@ fn parse_target(raw: &str) -> Result<TargetSpec, String> {
             })
         }
         "tcp" | "http" | "https" => Err(format!(
-            "{}:// targets are reserved for a future probe backend and are not implemented yet",
-            scheme
+            "{scheme}:// targets are reserved for a future probe backend and are not implemented yet"
         )),
         _ => Err(format!(
-            "unsupported target scheme '{}'; use a plain host or icmp://host",
-            scheme
+            "unsupported target scheme '{scheme}'; use a plain host or icmp://host"
         )),
     }
 }
@@ -215,12 +233,9 @@ fn resolve(host: &str) -> Result<IpAddr, String> {
     match (host, 0u16).to_socket_addrs() {
         Ok(mut iter) => match iter.next() {
             Some(sa) => Ok(sa.ip()),
-            None => Err(format!(
-                "unable to resolve '{}': no addresses returned",
-                host
-            )),
+            None => Err(format!("unable to resolve '{host}': no addresses returned")),
         },
-        Err(e) => Err(format!("unable to resolve '{}': {}", host, e)),
+        Err(e) => Err(format!("unable to resolve '{host}': {e}")),
     }
 }
 

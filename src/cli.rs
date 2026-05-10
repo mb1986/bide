@@ -65,14 +65,13 @@ pub(crate) fn parse_duration_arg(raw: &str) -> Result<Duration, String> {
 
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(format!(
-            "invalid duration '{}'; use a whole number with optional ms, s, m, or h suffix",
-            raw
+            "invalid duration '{raw}'; use a whole number with optional ms, s, m, or h suffix"
         ));
     }
 
     let value = digits
         .parse::<u64>()
-        .map_err(|_| format!("duration '{}' is too large", raw))?;
+        .map_err(|_| format!("duration '{raw}' is too large"))?;
 
     match unit {
         "ms" => Ok(Duration::from_millis(value)),
@@ -80,11 +79,11 @@ pub(crate) fn parse_duration_arg(raw: &str) -> Result<Duration, String> {
         "m" => value
             .checked_mul(60)
             .map(Duration::from_secs)
-            .ok_or_else(|| format!("duration '{}' is too large", raw)),
+            .ok_or_else(|| format!("duration '{raw}' is too large")),
         "h" => value
             .checked_mul(60 * 60)
             .map(Duration::from_secs)
-            .ok_or_else(|| format!("duration '{}' is too large", raw)),
+            .ok_or_else(|| format!("duration '{raw}' is too large")),
         _ => unreachable!(),
     }
 }
@@ -109,6 +108,14 @@ mod tests {
     #[test]
     fn rejects_invalid_durations() {
         for raw in ["", "-1s", "1.5s", "1d", "ms"] {
+            assert!(parse_duration_arg(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn duration_suffixes_are_case_sensitive() {
+        // FR-13 specifies lowercase suffixes only; lock that in.
+        for raw in ["3S", "3MS", "2M", "1H"] {
             assert!(parse_duration_arg(raw).is_err(), "{raw}");
         }
     }

@@ -19,7 +19,7 @@ pub trait Probe {
     fn target(&self) -> IpAddr;
 
     /// Short backend name, e.g. "icmp".
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Send one probe with the given sequence number. Wait at most until `deadline`.
     /// Returns `Success` if a matching reply arrives before `deadline`, otherwise

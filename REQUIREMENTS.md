@@ -180,3 +180,4 @@ Adding HTTP may justify a future `--probe-timeout` flag. If added, it should def
 - JSON or other structured output.
 - Configurable packet size, TTL, DSCP markings.
 - Windows / macOS support beyond best effort.
+- IPv6 zone identifiers (scope IDs) such as `fe80::1%eth0`. `IpAddr` does not carry a scope, so link-local targets that require one are not supported.
